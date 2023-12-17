@@ -1,0 +1,491 @@
+---
+title: 'DATA698: Capstone'
+subtitle: 'Marketing Promotional Analysis'
+author: 'Donald Butler'
+date: '2023-12-10'
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 2
+  html_document:
+    theme: yeti
+    highlight: tango
+    toc: yes
+    toc_float: yes
+    toc_depth: 3
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80), tidy=TRUE, echo = TRUE)
+```
+
+# Packages
+
+```{r packages, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(usmap)
+library(cowplot)
+library(magick)
+library(openxlsx)
+library(fpp3)
+```
+
+# Introduction
+
+On May 11th, 2023 Burger King announced to its franchisees a national promotion, **$5 Whopper Jr. Duo**, which would include two Whopper Jr. sandwiches for $5 that was set to begin on May 18th. In their announcement, they provided the following forecast of various versions of the sandwich that were included within the promotion.
+
+| Menu Item | Baseline | Media | Post Media |
+| :-------- | :------: | :---: | :--------: |
+| Whopper Jr. | 37.4 | 61.7 | 55.5 |
+| Whopper Jr. with cheese | 18.6 | 34.3 | 30.0 |
+| Whopper Jr. with bacon & cheese | 0.6 | 7.9 | 6.2 |
+| BBQ Bacon Whopper Jr. | 0 | 4.7 | 3.6 |
+| BBQ Bacon & Cheese Whopper Jr. | 0 | 4.7 | 3.6 |
+| Bacon & Swiss Whopper Jr. | 0 | 4.5 | 3.0 |
+| **Total** | **56.6** | **117.8** | **101.9** |
+
+A national media advertising campaign would begin at the start of the promotion and last for 6 weeks. The promotion would continue for an additional 7 weeks for a total of 13 weeks, May 18 through Aug 14. The Baseline was taken from a 3-week period in February, and the Media and Post Media forecast was generated from a market test of this promotion which occurred in the Scranton - Wilkes-Barre Designated Market Area (DMA) in December 2022.
+
+Based on the forecast, sales of Whopper Jr. are expected to increase by 108% during the media campaign, then soften in the weeks following. In August when the promotion was set to expire, it was extended due to its success.
+
+The Whopper Jr. sandwich is a smaller version of Burger King's signature sandwich the Whopper. Below is a table of the ingredients that make the Whopper and Whopper Jr. which shows that the Jr is about half the size of the Whopper.
+
+| Component | Whopper | Whopper Jr. |
+| :-------- | :------ | :---------- |
+| Mayonnaise | 3/4 Ounces | 3/8 Ounces |
+| Lettuce | 3/4 Ounces | 3/8 Ounces |
+| Tomato | 2 Slices | 1 Slice |
+| Onions | 3 Slices | 2 Slices |
+| Ketchup | 1/2 Ounce | 1/3 Ounce |
+| Patty (precooked) | 4.4 Ounces | 2.0 Ounces |
+| Cheese | 2 Slices | 1 Slice |
+| Bacon | 1 Slice | 1/2 Slice |
+
+I wanted to determine the success, or failure, of this promotion by evaluating the following factors.
+
+1. Are the increases in sales of the Whopper Jr. offset by decreases in sales of the Whopper?
+
+> Since the component costs of the Whopper Jr. is about half the Whopper and the $5 price of the promotion is less than the price of the Whopper, offsets in sales may not have a positive overall impact. Additionally, since the promotion price includes cheese & bacon which normally have an additional charge, the difference in revenue lost in item offsets may be significant. 
+
+2. Did restaurants see increases in same store sales and average guest check total?
+
+> Same store sales and average guest check are common measures in the Quick Service Restaurant (QSR) industry. If we evaluate these statistics for orders that included the promotion, and those that didn't, we can determine if the promotion is successful.
+
+# Carrols Corporation
+
+I work for the Carrols Corporation which is the largest Burger King franchisee in the United States. I used the Burger King API to load details about Carrols' Restaurants.
+
+```{r BKStores, warning=FALSE}
+if (!file.exists('./data/BKStores.csv')) {
+  # API Call to retrieve a list of all Burger King Restaurants
+  BKStores <- httr::GET('https://mdm.whopper.com/bk-locations-service/locationsFieldSet4?&brand=BK') |>
+    content(as = 'text') |>
+    fromJSON() |>
+    filter(country == 'US', status != 'Closed') |>
+    mutate(postalCode = substring(postalCode, 0, 5),
+           state = stateProvince,
+           Remodel = (status != 'Open'),
+           Carrols = (!is.na(reportingUnit) & reportingUnit == 'Carrols')) |>
+    select(id, city, state, postalCode, dmaName, latitude, longitude, Carrols, Remodel)
+  
+  BKStores |>
+    write.csv('./data/BKStores.csv', row.names = FALSE)
+} else {
+  BKStores <- read.csv('./data/BKStores.csv')
+}
+
+BKStores <- BKStores |>
+  usmap_transform(input_names = c('longitude','latitude'), output_names = c('lon','lat'))
+
+CarrolsStores <- BKStores |>
+  filter(Carrols == TRUE)
+
+```
+
+We operate `r CarrolsStores |> count()` restaurants, which is approximately `r sprintf('%0.0f%%',CarrolsStores |> count() / BKStores |> count() * 100)` of all Burger King restaurants in the US. Carrols operates primarily on the east coast with restaurants in `r CarrolsStores |> count(state) |> count()` states.
+
+```{r CarrolsLocations}
+myplot <- plot_usmap(regions = 'states', labels = TRUE, include = (CarrolsStores |> distinct(state))$state) + 
+  geom_point(data = CarrolsStores, aes(x = lon, y = lat, colour = 'Carrols'), show.legend = FALSE) + 
+  scale_color_manual(values = c(Carrols = '#F58426'))
+
+ggdraw() + draw_image('./images/CarrolsBK.jpg', scale = .25, halign = 0, valign = 1) + draw_plot(myplot)
+```
+
+# Data Collection
+
+We maintain transactional sales data in a Microsoft SQL server. I wanted to generate a data set that would include the number of Whoppers and Whopper Jrs. sold, the number of promotional Duos sold, and the total revenue of orders, and the total revenue of orders that included the promotion by day. I included delivery data as a baseline during the promotion since the offer was only available for in-store orders.
+
+I used the following query to generate the data set used in this project. The results of the query were loaded into an Excel workbook which could be read and evaluated.
+
+```{SQL WeeklyQuery, class.source = 'fold-show'}
+SELECT A.WeekDate, A.Store, A.OrderSource, SUM(A.Orders) Orders
+  , SUM(A.SubTotal) SubTotal, SUM(A.Whoppers) Whoppers, SUM(A.Jrs) Jrs
+  , SUM(A.Duos) Duos, SUM(A.DuoOrders) DuoOrders, SUM(A.DuoSubTotal) DuoSubTotal
+FROM (
+	SELECT DATEADD(DAY,-((DATEPART(WEEKDAY,o.BusinessDate)+2) % 7),o.BusinessDate) WeekDate
+	  , o.Store, o.OrderNum, CASE WHEN o.OrderPoint IN ('2','3','4','5','6') THEN 'Delivery' ELSE 'Store' END OrderSource
+		, 1 Orders, o.SubTotal, CASE WHEN w.Whoppers IS NULL THEN 0 ELSE w.Whoppers END Whoppers
+		, CASE WHEN j.Jrs IS NULL THEN 0 ELSE j.Jrs END Jrs
+		, CASE WHEN d.Duos IS NULL THEN 0 ELSE d.Duos END Duos
+		, CASE WHEN d.Duos IS NULL THEN 0 ELSE 1 END DuoOrders
+		, CASE WHEN d.Duos IS NULL THEN 0 ELSE o.SubTotal END DuoSubTotal
+	FROM dbo.tblEJOrder o
+	LEFT JOIN (
+		SELECT BusinessDate, Store, OrderNum, SUM(Qty) Whoppers
+		FROM dbo.tblEJOrderItem
+		WHERE ItemNum IN (1002,1402,1452,1552,63101,63201) AND Status = 1
+		GROUP BY BusinessDate, Store, OrderNum
+	) w ON o.BusinessDate = w.BusinessDate AND o.Store = w.Store AND o.OrderNum = w.OrderNum
+	LEFT JOIN (
+		SELECT BusinessDate, Store, OrderNum, SUM(Qty) Jrs
+		FROM dbo.tblEJOrderItem
+		WHERE ItemNum IN (1082,1406,1456,1556,63137,63150,63237,63250) AND Status = 1
+		GROUP BY BusinessDate, Store, OrderNum
+	) j ON o.BusinessDate = j.BusinessDate AND o.Store = j.Store AND o.OrderNum = j.OrderNum
+	LEFT JOIN (
+		SELECT BusinessDate, Store, OrderNum, SUM(Qty) Duos
+		FROM dbo.tblEJOrderItem
+		WHERE ItemNum = 61555 AND Status = 1
+		GROUP BY BusinessDate, Store, OrderNum
+	) d ON o.BusinessDate = d.BusinessDate AND o.Store = d.Store AND o.OrderNum = d.OrderNum
+	WHERE o.Status = 1 AND o.Company = 'CAR' AND o.BusinessDate BETWEEN '2023-04-20' AND '2023-08-16'
+) A
+GROUP BY A.WeekDate, A.Store, A.OrderSource
+ORDER BY A.Store, A.WeekDate, A.OrderSource
+```
+
+# Market Test
+
+A market test was conducted in the Scranton DMA during a 5-week period from 12/01/2022 through 01/04/2023. Carrols has 14 stores in the DMA that participated in the market test and I collected weekly sales data for these stores to evaluate the promotion during the test. Additionally, I collected the 5-week period prior to the test and the 5-week period after the test to determine if the test had a lasting impact.
+
+## Load Data
+
+Data is loaded from an Excel spreadsheet. 
+
+```{r}
+MarketTest.df <- read.xlsx('./data/Carrols.xlsx', sheet = 1, detectDates = TRUE) |>
+  mutate(DMA = as.factor(DMA),
+         CLS = as.factor(CLS),
+         Orders = as.integer(Orders),
+         SubTotal = as.integer(SubTotal),
+         Whoppers = as.integer(Whoppers),
+         Jrs = as.integer(Jrs),
+         Duos = as.integer(Duos),
+         DuoOrders = as.integer(DuoOrders),
+         DuoSubTotal = as.integer(DuoSubTotal),
+         DlvOrders = as.integer(DlvOrders),
+         DlvSubTotal = as.integer(DlvSubTotal))
+```
+
+## Data Examination
+
+```{r}
+summary(MarketTest.df)
+```
+
+| Field | Description |
+| :---- | :---------- |
+| WeekDate | Start date for the week which runs Thursday through Wednesday. |
+| CLS | This is the internal Carrols store number. |
+| DMA | Designated Market Area: Television Ad Markets. |
+| Orders | Number of in-store orders for the week. |
+| SubTotal | Total revenue for in-store orders. |
+| Whoppers | Total number Whoppers sold in-store. |
+| Jrs | Total number of Whopper Jrs. sold in-store, includes 2 for every Duo Promotion sold. |
+| Duos | Total number of Duo Promotions sold in-store. |
+| DuoOrders | Total number of in-store orders that contained the Duo Promotion. |
+| DuoSubTotal | Total revenue for in-store orders that contained the Duo Promotion. |
+| DlvOrders | Total number of delivery orders. |
+| DlvSubTotal | Total revenue for delivery orders. |
+
+
+## Burger Sales
+
+One of the features of the promotion that I wanted to evaluate was the offset of Whoppers for Whopper Jr. sandwiches. Whoppers traditionally outsell Whopper Jrs. by 2:1, but as expected, when the promotion began, the sale of Whopper Jrs. increased, at the expense of Whopper sales.
+
+```{r}
+MarketTest.df |>
+  select(WeekDate, CLS, Whoppers, Jrs) |>
+  pivot_longer(cols = c('Whoppers','Jrs'), 
+               names_to = 'Sandwich', values_to = 'Count') |>
+  ggplot(aes(x = WeekDate, y = Count)) + 
+  geom_line(aes(color = Sandwich)) + 
+  scale_color_manual(values = c('blue','red')) + 
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) + 
+  geom_vline(xintercept = as.numeric(c(as.Date('2022-12-01'), as.Date('2022-12-29'))),
+             linetype = 4, color = 'black') + 
+  facet_wrap(CLS ~ ., scales = 'fixed') + 
+  labs(title = 'Weekly Sales of Whopper and Whopper Jr. Sandwiches',
+       subtitle = 'by Carrols Restaurant',
+       x = 'Date', y = 'Burger Sales')
+```
+
+## Revenue
+
+When looking at the revenue for each store before, during, and after the promotion, it seems as if revenue decreased during the promotion. I included delivery revenue as a comparison, since it did not participate in the promotion, but it's such a small percentage of sales, it doesn't register much change.
+
+```{r}
+MarketTest.df |>
+  select(WeekDate, CLS, SubTotal, DlvSubTotal) |>
+  pivot_longer(cols = c('SubTotal','DlvSubTotal'), 
+               names_to = 'Source', values_to = 'Revenue') |>
+  ggplot(aes(x = WeekDate, y = Revenue)) + 
+  geom_line(aes(color = Source)) + 
+  scale_color_manual(values = c('blue','red')) + 
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) + 
+  geom_vline(xintercept = as.numeric(c(as.Date('2022-12-01'), as.Date('2022-12-29'))),
+             linetype = 4, color = 'black') + 
+  facet_wrap(CLS ~ ., scales = 'fixed') + 
+  labs(title = 'Weekly Revenue of in-store and delivery sales',
+       subtitle = 'by Carrols Restaurant',
+       x = 'Date',y = 'Weekly Revenue $')
+```
+
+## Average Guest Check
+
+This provided a very surprising result that the average guest check for orders that included the promotion is higher than the average guest check for orders that didn't. This is likely caused by the fact that the promotion for two Jrs. cannot be combined with the standard combo that would include fries and a drink. 
+
+```{r, warning=FALSE}
+MarketTest.df |>
+  mutate(Check = (SubTotal - DuoSubTotal) / (Orders - DuoOrders),
+         DuoCheck = DuoSubTotal / DuoOrders) |>
+  select(WeekDate, CLS, Check, DuoCheck) |>
+  pivot_longer(cols = c('Check','DuoCheck'), 
+               names_to = 'CheckType', values_to = 'Average') |>
+  ggplot(aes(x = WeekDate, y = Average)) + 
+  geom_line(aes(color = CheckType)) + 
+  scale_color_manual(values = c('blue','red')) + 
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) + 
+  geom_vline(xintercept = as.numeric(c(as.Date('2022-12-01'), as.Date('2022-12-29'))),
+             linetype = 4, color = 'black') + 
+  facet_wrap(CLS ~ ., scales = 'fixed') + 
+  labs(title = 'Average Guest Check for orders with and without the Duo Promotion',
+       subtitle = 'by Carrols Restaurant',
+       x = 'Date', y = 'Avg Guest Check $')
+  
+  
+```
+
+## Summary
+
+During the promotion market test we see a number of factors that indicate this is will be a successful promotion.
+
+Whopper Jr. sales increased 71% over the 5-week period preceding the promotion.
+
+While we did see a revenue decrease during the promotion, that trend continued into the 5-weeks after the promotion, which could indicate outside factors. However we did see an increase of $1.25 in average guest check price for those orders that included the promotion versus those that did not.
+
+Initial concerns about this promotion just offsetting Whopper Jr. sales for Whopper sales are not founded. While we are seeing a decrease in Whopper sales of 74 sandwiches per week, we are saw the promotion used 167 times per week, which more than offsets the Whopper losses. 
+
+```{r}
+MarketTest.summary <- MarketTest.df |>
+  mutate(Period = case_when(WeekDate < as.Date('2022-12-01') ~ '10/27 - 11/30',
+                            WeekDate < as.Date('2023-01-05') ~ '12/01 - 01/04', .default = '01/05 - 02/08')) |>
+  summarise(Orders = as.integer(mean(Orders - DuoOrders)),
+            SubTotal = as.integer(mean(SubTotal - DuoSubTotal)),
+            Whoppers = as.integer(mean(Whoppers)),
+            Jrs = as.integer(mean(Jrs)),
+            Duos = as.integer(mean(Duos)),
+            DuoOrders = as.integer(mean(DuoOrders)),
+            DuoSubTotal = as.integer(mean(DuoSubTotal)),
+            DlvOrders = as.integer(mean(DlvOrders)),
+            DlvSubTotal = as.integer(mean(DlvSubTotal)),
+            .by = c('DMA','Period')) |>
+  mutate(AvgCheck = round(SubTotal / Orders,2),
+         DuoAvgCheck = round(DuoSubTotal / DuoOrders,2))
+
+knitr::kable(MarketTest.summary |> 
+               select(DMA, Period, Orders, SubTotal, AvgCheck, 
+                      Whoppers, Jrs, Duos, DuoOrders, DuoSubTotal, 
+                      DuoAvgCheck))
+```
+
+# Nationwide Promotion
+
+The **$5 Whopper Jr. Duo** nationwide promotion went live on May 18th, 2023. I've collected weekly sales data for all Carrols stores.
+
+## Load Data
+
+Data is loaded from an Excel spreadsheet. 
+
+```{r}
+Promotion.df <- read.xlsx('./data/Carrols.xlsx', sheet = 2, detectDates = TRUE) |>
+  mutate(DMA = as.factor(DMA),
+         CLS = as.factor(CLS),
+         Orders = as.integer(Orders),
+         SubTotal = as.integer(SubTotal),
+         Whoppers = as.integer(Whoppers),
+         Jrs = as.integer(Jrs),
+         Duos = as.integer(Duos),
+         DuoOrders = as.integer(DuoOrders),
+         DuoSubTotal = as.integer(DuoSubTotal),
+         DlvOrders = as.integer(DlvOrders),
+         DlvSubTotal = as.integer(DlvSubTotal))
+```
+
+Group the data by DMA to evaluate rather than individual restaurants.
+
+```{r}
+Groups.df <- Promotion.df |>
+  summarise(Orders = as.integer(mean(Orders)),
+            SubTotal = as.integer(mean(SubTotal)),
+            Whoppers = as.integer(mean(Whoppers)),
+            Jrs = as.integer(mean(Jrs)),
+            Duos = as.integer(mean(Duos)),
+            DuoOrders = as.integer(mean(DuoOrders)),
+            DuoSubTotal = as.integer(mean(DuoSubTotal)),
+            DlvOrders = as.integer(mean(DlvOrders)),
+            DlvSubTotal = as.integer(mean(DlvSubTotal)),
+            .by = c('WeekDate','DMA')) |>
+  mutate(AvgCheck = round(SubTotal / Orders,2),
+         DuoAvgCheck = round(DuoSubTotal / DuoOrders,2))
+
+summary(Groups.df)
+```
+
+## DMAs
+
+Carrols has restaurants in 65 DMAs, so we'll select the top 15, by number of restaurants, to evaluate.
+
+```{r}
+TopDMAs <- Promotion.df |>
+  filter(WeekDate == as.Date('2023-04-20')) |>
+  count(DMA) |>
+  arrange(desc(n)) |>
+  head(15)
+
+TopDMAs
+```
+
+## Burger Sales
+
+Examining burger sales for the top 15 DMAs shows similar increases in Whopper Jrs. at the start of the promotion. As we saw previous, Whopper sales have come down with the promotion, but by much less than the increase in Jrs.
+
+The second vertical line indicates the end of the media ad campaign, which was expected to see a decline in Whopper Jr. sales, but sales remain strong without the campaign.
+
+```{r}
+Groups.df |>
+  inner_join(TopDMAs, by = join_by(DMA)) |>
+  select(WeekDate, DMA, Whoppers, Jrs) |>
+  pivot_longer(cols = c('Whoppers','Jrs'), 
+               names_to = 'Sandwich', values_to = 'Count') |>
+  ggplot(aes(x = WeekDate, y = Count)) + 
+  geom_line(aes(color = Sandwich)) + 
+  scale_color_manual(values = c('blue','red')) + 
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) + 
+  geom_vline(xintercept = as.numeric(c(as.Date('2023-05-18'), as.Date('2023-06-29'))),
+             linetype = 4, color = 'black') + 
+  facet_wrap(DMA ~ ., scales = 'fixed', ncol = 4) + 
+  labs(title = 'Weekly Sales of Whopper and Whopper Jr. Sandwiches',
+       subtitle = 'by DMA',
+       x = 'Date', y = 'Burger Sales')
+```
+
+## Revenue
+
+We are seeing similar declines in weekly revenue that were seen in the Market Test. 
+
+```{r}
+Groups.df |>
+  inner_join(TopDMAs, by = join_by(DMA)) |>
+  select(WeekDate, DMA, SubTotal, DlvSubTotal) |>
+  pivot_longer(cols = c('SubTotal','DlvSubTotal'), 
+               names_to = 'Source', values_to = 'Revenue') |>
+  ggplot(aes(x = WeekDate, y = Revenue)) + 
+  geom_line(aes(color = Source)) + 
+  scale_color_manual(values = c('blue','red')) + 
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) + 
+  geom_vline(xintercept = as.numeric(c(as.Date('2023-05-18'), as.Date('2023-06-29'))),
+             linetype = 4, color = 'black') + 
+  facet_wrap(DMA ~ ., scales = 'fixed') + 
+  labs(title = 'Weekly Revenue of in-store and delivery sales',
+       subtitle = 'by DMA',
+       x = 'Date',y = 'Weekly Revenue $')
+```
+
+## Average Guest Check
+
+This is the result that I expected to see with the market test. Average guest check for these DMAs are consistently lower for orders that have the promotion versus those that do not.
+
+```{r, warning=FALSE}
+Groups.df |>
+  inner_join(TopDMAs, by = join_by(DMA)) |>
+  mutate(Check = (SubTotal - DuoSubTotal) / (Orders - DuoOrders),
+         DuoCheck = DuoSubTotal / DuoOrders) |>
+  select(WeekDate, DMA, Check, DuoCheck) |>
+  pivot_longer(cols = c('Check','DuoCheck'), 
+               names_to = 'CheckType', values_to = 'Average') |>
+  ggplot(aes(x = WeekDate, y = Average)) + 
+  geom_line(aes(color = CheckType)) + 
+  scale_color_manual(values = c('blue','red')) + 
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) + 
+  geom_vline(xintercept = as.numeric(c(as.Date('2023-05-18'), as.Date('2023-06-29'))),
+             linetype = 4, color = 'black') + 
+  facet_wrap(DMA ~ ., scales = 'fixed') + 
+  labs(title = 'Average Guest Check for orders with and without the Duo Promotion',
+       subtitle = 'by DMA',
+       x = 'Date', y = 'Avg Guest Check $')
+  
+  
+```
+
+## DMA Summary
+
+Most of the top DMAs have seen a decrease in revenue and are also seeing lower guest check prices for those that have the promotion versus those that do not. While we are seeing increases in Whopper Jrs. that more than offset the losses in Whoppers, it doesn't not appear that the national promotion is having the same success as the market test did in Scranton.
+
+```{r}
+Groups.summary <- Groups.df |>
+  mutate(Period = case_when(WeekDate < as.Date('2023-05-18') ~ '04/20 - 05/17',
+                            WeekDate < as.Date('2023-06-29') ~ '05/18 - 06/28', .default = '06/29 - 08/16')) |>
+  summarise(Orders = as.integer(mean(Orders - DuoOrders)),
+            SubTotal = as.integer(mean(SubTotal - DuoSubTotal)),
+            Whoppers = as.integer(mean(Whoppers)),
+            Jrs = as.integer(mean(Jrs)),
+            Duos = as.integer(mean(Duos)),
+            DuoOrders = as.integer(mean(DuoOrders)),
+            DuoSubTotal = as.integer(mean(DuoSubTotal)),
+            DlvOrders = as.integer(mean(DlvOrders)),
+            DlvSubTotal = as.integer(mean(DlvSubTotal)),
+            .by = c('DMA','Period')) |>
+  mutate(AvgCheck = round(SubTotal / Orders,2),
+         DuoAvgCheck = round(DuoSubTotal / DuoOrders,2))
+
+knitr::kable(Groups.summary |> 
+               inner_join(TopDMAs, by = join_by(DMA)) |>
+               select(DMA, Period, Orders, SubTotal, AvgCheck, 
+                      Whoppers, Jrs, Duos, DuoOrders, DuoSubTotal, 
+                      DuoAvgCheck))
+```
+
+## Overall Summary
+
+Across all of our restaurants we are seeing average guest checks about $0.50 less on orders that include the promotion versus orders that do not. We are also seeing reductions in the weekly number of orders and total revenue which indicates that the promotion is also not driving traffic into the restaurants.
+
+Sales of Whopper Jrs. have remained high since the beginning of the promotion, even though the media campaign ended, but we are not seeing increased check sizes or revenue, which would cause me to recommend that the promotion be ended.
+
+```{r}
+Promotion.summary <- Promotion.df |>
+  mutate(Period = case_when(WeekDate < as.Date('2023-05-18') ~ '04/20 - 05/17',
+                            WeekDate < as.Date('2023-06-29') ~ '05/18 - 06/28', .default = '06/29 - 08/16')) |>
+  summarise(Orders = as.integer(mean(Orders - DuoOrders)),
+            SubTotal = as.integer(mean(SubTotal - DuoSubTotal)),
+            Whoppers = as.integer(mean(Whoppers)),
+            Jrs = as.integer(mean(Jrs)),
+            Duos = as.integer(mean(Duos)),
+            DuoOrders = as.integer(mean(DuoOrders)),
+            DuoSubTotal = as.integer(mean(DuoSubTotal)),
+            DlvOrders = as.integer(mean(DlvOrders)),
+            DlvSubTotal = as.integer(mean(DlvSubTotal)),
+            .by = c('Period')) |>
+  mutate(AvgCheck = round(SubTotal / Orders,2),
+         DuoAvgCheck = round(DuoSubTotal / DuoOrders,2))
+
+knitr::kable(Promotion.summary |>
+               select(Period, Orders, SubTotal, AvgCheck, 
+                      Whoppers, Jrs, Duos, DuoOrders, DuoSubTotal, 
+                      DuoAvgCheck))
+```
+
